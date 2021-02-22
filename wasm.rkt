@@ -123,10 +123,14 @@
         (e_1 (call-stack i () (e_2 ...) κ) scope table)
         call_args_init]
 
+   ;; If haven't evaluated all args, evaluate next arg
+   [--> (v_1 (call-stack i (v_2 ...) (e_1 e_2 ...) κ) scope table)
+        (e_1 (call-stack i (v_2 ... v_1) (e_2 ...) κ) scope table)
+        call_args_next]
 
-   ;; After evaluating args, make the call
+   ;; After evaluating all args, make the call
    [--> (v_1 (call-stack i (v_2 ...) () κ) scope table)
-        ((function-get table i) (call-stack (v_1 v_2 ...) () κ) (mt-h () scope) table)
+        ((function-get table i) (call-stack i (v_2 ... v_1) () κ) (mt-h () scope) table)
         function_call]
 
    ;; Call with no args
@@ -136,12 +140,13 @@
 
    ;;;;;; Functions ;;;;;;
 
-   
-   [--> ((func i fe_1 fe_2 ...) (call-stack (v_1 v_2 ...) () κ) (hashmap (v_arg ...) scope) table)
-        ((func i fe_1 fe_2 ...) (call-stack (v_2 ...) () κ) (hashmap (v_arg ... v_1) scope) table)
+   ;; Add call stack args to scope bindings
+   [--> ((func i fe_1 fe_2 ...) (call-stack i (v_1 v_2 ...) () κ) (hashmap (v_arg ...) scope) table)
+        ((func i fe_1 fe_2 ...) (call-stack i (v_2 ...) () κ) (hashmap (v_arg ... v_1) scope) table)
         function_entry_args]
 
-   [--> ((func i fe_1 fe_2 ...) (call-stack () () κ) scope table)
+   ;; When all call stack args are added, start evaluating function expressions
+   [--> ((func i fe_1 fe_2 ...) (call-stack i () () κ) scope table)
         (fe_1 (function-expressions fe_2 ... κ) scope table)
         function_entry_args_done]
 
@@ -150,10 +155,10 @@
         (v κ scope table)
         function_frame_discard]
 
+   ;; If function expression is a param statement, add param value to hashmap and continue evaluating
    [--> ((param i t) (function-expressions fe_1 fe_2 ... κ) (hashmap (v_1 v_2 ...) scope) table)
         (fe_1 (function-expressions fe_2 ... κ) ((hashmap-add hashmap i v_1) (v_2 ...) scope) table)
         param_add]
-        
         
 
    ;;;;;; To be named section ;;;;;;
@@ -178,47 +183,55 @@
            #:trace b)]))
 
 
- #;(test-wasm (term (i32 add (i32 const 5) (i32 const 5)))
-              (term (i32 const 10)) #:trace #f)
+#;(test-wasm (term (i32 add (i32 const 5) (i32 const 5)))
+             (term (i32 const 10)) #:trace #f)
 
- #;(test-wasm (term (i32 add
-                         (i32 const 5)
-                         (i32 add
-                              (i32 const 3)
-                              (i32 const 4))))
-              (term (i32 const 12)) #:trace #t)
+#;(test-wasm (term (i32 add
+                        (i32 const 5)
+                        (i32 add
+                             (i32 const 3)
+                             (i32 const 4))))
+             (term (i32 const 12)) #:trace #t)
 
 ; Simple function call with one argument
- (test-wasm (term ((module
-                       (func testFunc
-                             (param $0 i32)
-                             (get-local $0))
-                     (func testFunc2 (i32 const 10)))
-                   (call testFunc (i32 const 5))))
-            (term (i32 const 5)) #:trace #f)
+(test-wasm (term ((module
+                      (func testFunc
+                            (param $0 i32)
+                            (get-local $0)))
+                  (call testFunc (i32 const 5))))
+           (term (i32 const 5)) #:trace #f)
+
+; Function call with two arguments
+(test-wasm (term ((module
+                      (func testFunc
+                            (param $0 i32)
+                            (param $1 i32)
+                            (get-local $1)))
+                  (call testFunc (i32 const 5) (i32 const 13))))
+           (term (i32 const 13)) #:trace #f)
 
 ; Slightly more complex function call which does math on the argument
- (test-wasm (term ((module
-                       (func testFunc
-                             (param $0 i32)
-                             (i32 add
-                                  (get-local $0)
-                                  (i32 const 1)))
-                     (func testFunc2 (i32 const 10)))
-                   (call testFunc (i32 const 5))))
-            (term (i32 const 6)) #:trace #f)
-
-; Function which calls another function
-  (test-wasm (term ((module
-                       (func testFunc
-                             (param $0 i32)
-                             (i32 add
-                                  (call testFunc2 (i32 const 5))
-                                  (get-local $0)))
-                      (func testFunc2
+(test-wasm (term ((module
+                      (func testFunc
                             (param $0 i32)
                             (i32 add
                                  (get-local $0)
-                                 (i32 const 15))))
-                   (call testFunc (i32 const 6))))
-            (term (i32 const 26)) #:trace #t)
+                                 (i32 const 1)))
+                    (func testFunc2 (i32 const 10)))
+                  (call testFunc (i32 const 5))))
+           (term (i32 const 6)) #:trace #f)
+
+; Function which calls another function
+(test-wasm (term ((module
+                      (func testFunc
+                            (param $0 i32)
+                            (i32 add
+                                 (call testFunc2 (i32 const 5))
+                                 (get-local $0)))
+                    (func testFunc2
+                          (param $0 i32)
+                          (i32 add
+                               (get-local $0)
+                               (i32 const 15))))
+                  (call testFunc (i32 const 6))))
+           (term (i32 const 26)) #:trace #f)
