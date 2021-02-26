@@ -25,18 +25,23 @@
 
 (define-language WASM
   (c ::= real)
-  (e ::= binop (const c) (call i) trap debug-inst
-     (get-local i) (param i))
+  (e ::= binop relop (const c) (call i) trap debug-inst
+     (get-local i) (set-local i) (local i) (param i)
+     (block e ... end)
+     (loop e ... end)
+     (br j) (br-if j))
   (binop ::= add sub mul div)
+  (relop ::= eq ne)
   (f ::= (func i e ...))
   (m ::= (module f ...))
   (i ::= variable-not-otherwise-mentioned)
+  (j ::= natural)
 
   ; Debugging statement, should never show up in a valid program
   (debug-inst ::= (debug any ...)))
 
 (define-extended-language WASM-eval WASM
-  (op ::= binop)
+  (op ::= binop relop)
   (init ::= (m e ...))
   
   (s ::= (s-func s-table s-mem))
@@ -44,8 +49,10 @@
   (s-table ::= mt-s-table)
   (s-mem ::= mt-s-mem)
   
-  (L ::= mt-context (local (e ...) L))
-  (local ::= mt-local (i v local))
+  (L ::= mt-context (labels locals (e ...) L))
+  ;; the signature of labels is (loop-instrs instrs-after-block labels)
+  (labels ::= mt-labels ((e ...) (e ...) labels))
+  (locals ::= mt-locals (i v locals))
   (v ::= (const c)))
 
 ;;;;;; METAFUNCTIONS ;;;;;;
@@ -54,7 +61,13 @@
 
 (define-metafunction WASM-eval
   delta : op v ... -> v
-  [(delta add (const c_0) (const c_1)) (const ,(+ (term c_0) (term c_1)))])
+  [(delta add (const c_0) (const c_1)) (const ,(+ (term c_0) (term c_1)))]
+  [(delta eq (const c_0) (const c_1)) (const ,(if (equal? (term c_0) (term c_1))
+                                                  1
+                                                  0))]
+  [(delta ne (const c_0) (const c_1)) (const ,(if (equal? (term c_0) (term c_1))
+                                                  0
+                                                  1))])
 
 ;; Get and add functions
 
@@ -77,28 +90,41 @@
 ;; Local variables
 
 (define-metafunction WASM-eval
-  local-set-internal : local i v -> local
-  [(local-set-internal (i_local v_local local) i_arg v_arg)
-   ,(if (equal? (term i_local) (term i_arg))
-        (term (i_local v_arg local))
-        (term (i_local v_arg (local-set-internal local i_arg v_arg))))]
-  [(local-set-internal mt-local i v) (i v mt-local)])
+  locals-set-internal : locals i v -> locals
+  [(locals-set-internal (i_locals v_locals locals) i_arg v_arg)
+   ,(if (equal? (term i_locals) (term i_arg))
+        (term (i_locals v_arg locals))
+        (term (i_locals v_arg (locals-set-internal locals i_arg v_arg))))]
+  [(locals-set-internal mt-locals i v) (i v mt-locals)])
 
 (define-metafunction WASM-eval
-  local-get-internal : local i -> v
-  [(local-get-internal (i_local v_local local) i_arg)
-   ,(if (equal? (term i_local) (term i_arg))
-        (term v_local)
-        (term (local-get-internal local i_arg)))])
+  locals-get-internal : locals i -> v
+  [(locals-get-internal (i_locals v_locals locals) i_arg)
+   ,(if (equal? (term i_locals) (term i_arg))
+        (term v_locals)
+        (term (locals-get-internal locals i_arg)))])
 
 (define-metafunction WASM-eval
-  local-set : L i v -> L
-  [(local-set (local (e ...) L) i v) ((local-set-internal local i v) (e ...) L)])
+  locals-set : L i v -> L
+  [(locals-set (labels locals (e ...) L) i v) (labels (locals-set-internal locals i v) (e ...) L)])
 
 (define-metafunction WASM-eval
-  local-get : L i -> v
-  [(local-get (local (e ...) L) i) (local-get-internal local i)])
-  
+  locals-get : L i -> v
+  [(locals-get (labels locals (e ...) L) i) (locals-get-internal locals i)])
+
+;; Branching
+
+(define-metafunction WASM-eval
+  perform-br : v_rest ... j L s -> ((e ...) L s)
+  ;; recursively pop labels until we find the matching labels and append its instructions
+  [(perform-br v_rest ... j (((e_loop ...) (e_labels ...) labels) locals (e ...) L) s)
+   ,(if (equal? (term 0) (term j))
+        (term ((v_rest ... e_loop ... e_labels ...) (labels locals (e ...) L) s))
+        (term (perform-br v_rest ... ,(- (term j) 1) (labels locals (e ...) L) s)))]
+  ;; handle case where (br 0) needs to return from the function
+  [(perform-br v_rest ... 0 (mt-labels locals (e ...) L) s)
+   (term ((v_rest ... e ...) L s))]
+  [(perform-br v_rest ... j L s) (((debug "No matching labels for (br j)")) L s)])
 
 ;; MACHINE
 ;; ((values expressions) (context) (store))
@@ -128,21 +154,36 @@
         ((v_rest ... (delta binop v_1 v_2) e ...) L s)
         binop]
 
+   ;; All relative operators
+   [--> ((v_rest ... v_2 v_1 relop e ...) L s)
+        ((v_rest ... (delta relop v_1 v_2) e ...) L s)
+        relop]
+
    ;; Param
    [--> ((v_rest ... v_1 (param i) e ...) L s)
-        ((v_rest ... e ...) (local-set L i v_1) s)
+        ((v_rest ... e ...) (locals-set L i v_1) s)
         param]
+
+   ;; Local variables (initialized to 0)
+   [--> ((v_rest ... (local i) e ...) L s)
+        ((v_rest ... e ...) (locals-set L i (const 0)) s)
+        locals]
 
    ;; Get-local
    [--> ((v_rest ... (get-local i) e ...) L s)
-        ((v_rest ... (local-get L i) e ...) L s)
+        ((v_rest ... (locals-get L i) e ...) L s)
         get-local]
+
+   ;; Set-local
+   [--> ((v_rest ... v (set-local i) e ...) L s)
+        ((v_rest ... e ...) (locals-set L i v) s)
+        set-local]
 
    ;;;;; FUNCTION CALLS
    
    ;; Call
    [--> ((v_rest ... (call i) e ...) L s)
-        ((v_rest ... (function-get s i)) (mt-local (e ...) L) s)
+        ((v_rest ... (function-get s i)) (mt-labels mt-locals (e ...)  L) s)
         call]
 
    ;; Function expansion
@@ -151,13 +192,58 @@
         call-expansion]
 
    ;; Implicit return
-   [--> ((v_rest ...) (local (e ...) L) s)
+   [--> ((v_rest ...) (mt-labels locals (e ...) L) s)
         ((v_rest ... e ...) L s)
         return-implicit]
-  
-   ))
+
+   ;;;;; BRANCHING
+
+   ;; Block
+   [--> ((v_rest ... (block e_block ... end) e_rest ...)
+         (labels locals (e ...) L)
+         s)
+        ((v_rest ... e_block ...)
+         ((() (e_rest ...) labels) locals (e ...) L)
+         s)
+        block]
+
+   ;; Loop
+   [--> ((v_rest ... (loop e_block ... end) e_rest ...)
+         (labels locals (e ...) L)
+         s)
+        ((v_rest ... e_block ...)
+         ((((loop e_block ... end)) (e_rest ...) labels) locals (e ...) L)
+         s)
+        loop]
+
+   ;; Implicit end-block (ignore e_loop instructions when implicitly ending)
+   [--> ((v_rest ...)
+         (((e_loop ...) (e_rest ...) labels) locals (e ...) L)
+         s)
+        ((v_rest ... e_rest ...)
+         (labels locals (e ...) L)
+         s)
+        br-implicit]
+
+   ;; br j. Branch to j-th label in stack.
+   [--> ((v_rest ... (br j) e ...) L s)
+        (perform-br v_rest ... j L s)
+        br]
+
+   ;; br_if true
+   [--> ((v_rest ... (const c) (br-if j) e ...) L s)
+        (perform-br v_rest ... j L s)
+        (side-condition (not (equal? (term c) (term 0))))
+        br-if-true]
+
+   ;; br_if false
+   [--> ((v_rest ... (const 0) (br-if j) e ...) L s)
+        ((v_rest ... e ...) L s)
+        br-if-false]
    
-                      
+   ))
+
+
 (define (load p)
   (cond
     [(redex-match? WASM-eval init p) (term (,p mt-context (mt-s-func mt-s-table mt-s-mem)))]
@@ -235,5 +321,121 @@
                   (const 1)
                   (const 2)
                   (call caller)))
-           (term (const 11)) #:trace #t)
-           
+           (term (const 11)) #:trace #f)
+
+;; Simple block
+(test-wasm (term ((module
+                     (func my_func
+                           (block
+                            (const 1)
+                            end)
+                           (const 1)
+                           add
+                      ))
+                 (call my_func)))
+           (term (const 2)) #:trace #f)
+
+;; Simple br
+(test-wasm (term ((module
+                     (func my_func
+                           (block
+                            (br 0)
+                            (const 4)
+                            end)
+                           (const 1)
+                      ))
+                 (call my_func)))
+           (term (const 1)) #:trace #f)
+
+;; Nested br
+(test-wasm (term ((module
+                     (func my_func
+                           (block
+                            (block
+                             (block
+                              (br 1)
+                              (const 1)
+                             end)
+                             (const 2)
+                             end)
+                            (const 3)
+                            (br 0)
+                            end)
+                           (const 4)
+                           add
+                      ))
+                 (call my_func)))
+           (term (const 7)) #:trace #f)
+
+;; br-if true
+(test-wasm (term ((module
+                     (func my_func
+                           (block
+                            (const 2)
+                            (br-if 0)
+                            (const 4)
+                            end)
+                           (const 1)
+                      ))
+                 (call my_func)))
+           (term (const 1)) #:trace #f)
+
+;; br-if false
+(test-wasm (term ((module
+                     (func my_func
+                           (block
+                            (const 0)
+                            (br-if 0)
+                            (const 4)
+                            end)
+                           (const 1)
+                           add
+                      ))
+                 (call my_func)))
+           (term (const 5)) #:trace #f)
+
+;; Relop eq true
+(test-wasm (term ((module
+                     (func my_func
+                           (const 3)
+                           (const 3)
+                           eq
+                      ))
+                 (call my_func)))
+           (term (const 1)) #:trace #f)
+
+;; Relop eq false
+(test-wasm (term ((module
+                     (func my_func
+                           (const 3)
+                           (const 4)
+                           eq
+                      ))
+                 (call my_func)))
+           (term (const 0)) #:trace #f)
+
+;; Simple Loop
+(test-wasm (term ((module
+                     (func my_func
+                           (local $0)
+                           (const -4)
+                           (set-local $0)
+                           (const 0)
+                           (loop
+                            ;; increment result by 1
+                            (const 1)
+                            add
+                            ;; update $var0 by 1
+                            (const 1)
+                            (get-local $0)
+                            add
+                            (set-local $0)
+                            ;; break from loop if 0
+                            (get-local $0)
+                            (const 0)
+                            ne
+                            (br-if 0)
+                            end)
+                      ))
+                 (call my_func)))
+           (term (const 4)) #:trace #f)
