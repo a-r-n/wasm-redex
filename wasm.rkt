@@ -27,9 +27,13 @@
 (define-language WASM
   (c ::= real)
   (st ::= string)
-  (e ::= binop (const c) (call i) trap debug-inst
-     (get-local i) (param i))
+  (e ::= binop relop (const c) (call i) (call-indirect) trap debug-inst
+     (get-local i) (set-local i) (local i) (param i)
+     (block e ... end)
+     (loop e ... end)
+     (br j) (br-if j))
   (binop ::= add sub mul div)
+  (relop ::= eq ne)
   (f ::= (func i e ...))
   (mm ::= (ex ... memory c) )
   (table-type ::= funcref anyfunc)
@@ -40,27 +44,27 @@
   (m ::= (module tab elem-i ...  mm  f ...))
   (v ::= (const c))
   (i ::= variable-not-otherwise-mentioned)
+  (j ::= natural)
 
   ; Debugging statement, should never show up in a valid program
   (debug-inst ::= (debug any ...)))
 
 (define-extended-language WASM-eval WASM
-  (op ::= binop)
-  (init ::= (m e ... ))
-  (Σ-mem ::= mt-mem-store '())
-  
-  
-  (elem-c ::=  v_offset)
-  ;(table-c ::= (table-type c_size))
+
+  (op ::= binop relop)
+  (init ::= (m e ...))
+  (Σ-mem ::= mt-mem-store '())  
+  ;(elem-c ::=  v_offset)
   (s ::= (s-func s-table s-mem))
   (s-func ::= mt-s-func (i f s-func))
   (s-mem ::= mt-s-mem (c_memid v_index v Σ-mem s-mem))
-  (s-table ::= mt-s-table  (table-type c_size v_offset v_index i s-table)) ;table-c
-  ;(s-mem ::= mt-s-mem)
-  
-  (L ::= mt-context (local (e ...) L))
-  (local ::= mt-local (i v local))
-  )
+  (s-table ::= mt-s-table  (table-type c_size v_offset v_index i s-table))
+  (L ::= mt-context (labels locals (e ...) L))
+  ;; the signature of labels is (loop-instrs instrs-after-block labels)
+  (labels ::= mt-labels ((e ...) (e ...) labels))
+  (locals ::= mt-locals (i v locals))
+  (v ::= (const c)))
+
 
 ;;;;;; METAFUNCTIONS ;;;;;;
 
@@ -68,7 +72,15 @@
 
 (define-metafunction WASM-eval
   delta : op v ... -> v
-  [(delta add (const c_0) (const c_1)) (const ,(+ (term c_0) (term c_1)))])
+  [(delta add (const c_0) (const c_1)) (const ,(+ (term c_0) (term c_1)))]
+  [(delta eq (const c_0) (const c_1)) (const ,(if (equal? (term c_0) (term c_1))
+                                                  1
+                                                  0))]
+  [(delta ne (const c_0) (const c_1)) (const ,(if (equal? (term c_0) (term c_1))
+                                                  0
+                                                  1))])
+
+;;;;;;;;; TABLE
 
 ;; add table
 (define-metafunction WASM-eval
@@ -86,35 +98,55 @@
   table-set-offset : s v -> s
   [(table-set-offset (s-func s-table s-mem)  v_offset) (table-update-offset s-func s-mem s-table v_offset)])
 
-;;Add-update table offset
+;;Add-update table 
 (define-metafunction WASM-eval
   table-add-update-function : s-func s-mem s-table i -> s
   [(table-add-update-function s-func s-mem (table-type c_size v_offset v_index i_func s-table)  i_funcN)
    ,(if (equal? (term i_func) (term $nopointer))
         ;;update the table with the function and build up the store
-          (term ( s-func
-              (table-type c_size v_offset v_index i_funcN mt-s-table)
-               s-mem))
-         ;;add the function 
-         (if (< (term (extract-const-value v_offset)) (- (term c_size) 1))
-             ;;add the function to the table and build up the store
-             (term ( s-func
-               (table-type c_size  (const ,(+ (term (extract-const-value v_offset)) 1))
+        (term ( s-func
+                (table-type c_size v_offset v_index i_funcN mt-s-table)
+                s-mem))
+        ;;add the function 
+        (if (< (term (extract-const-value v_offset)) (- (term c_size) 1))
+            ;;add the function to the table and build up the store
+            (term ( s-func
+                    (table-type c_size  (const ,(+ (term (extract-const-value v_offset)) 1))
                                 (const ,(+ (term (extract-const-value v_index)) 1)) i_funcN
                                 (table-type c_size v_offset v_index i_func s-table))
-               s-mem))
+                    s-mem))
 
-             ;;throw exception
-             (term (func DEBUG-BAD (debug "Table index out of bound" c_size)))))])
+            ;;throw exception
+            (term (func DEBUG-BAD (debug "Table index out of bound" c_size)))))])
 
-;;helper meta-function to extract const real value
+;;helper meta-function to extract number from  (const c) value
 (define-metafunction WASM-eval
   extract-const-value : v -> c
   [(extract-const-value (const c_1)) c_1])
+
+
 ;;set table add function
 (define-metafunction WASM-eval
   table-operation-function : s i -> s
   [(table-operation-function (s-func s-table s-mem)  i_funcN) (table-add-update-function s-func s-mem s-table i_funcN)])
+
+;;fetch function from table
+(define-metafunction WASM-eval
+  fetch-from-table : s v -> f
+  [(fetch-from-table (s-func s-table s-mem) v_1) (search-table (s-func s-table s-mem) s-table v_1)])
+
+;;search the table with the const index
+
+(define-metafunction WASM-eval
+  search-table : s s-table v -> f
+  [(search-table s (table-type c_size v_offset v_index i s-table) v_1)
+   ;;use the index passed to fetch the function
+   ,(if (= (term (extract-const-value v_1))  (term (extract-const-value v_index)) )
+        (term (function-get s i))
+        (term (search-table s s-table v_1)))]
+    ;;throw exception, if its not found
+  [(search-table s mt-s-table v_1) (func DEBUG-BAD (debug "Function not found in Table" v_1))])
+  
 
 ;; Get and add Memory
 (define-metafunction WASM-eval
@@ -143,28 +175,41 @@
 ;; Local variables
 
 (define-metafunction WASM-eval
-  local-set-internal : local i v -> local
-  [(local-set-internal (i_local v_local local) i_arg v_arg)
-   ,(if (equal? (term i_local) (term i_arg))
-        (term (i_local v_arg local))
-        (term (i_local v_arg (local-set-internal local i_arg v_arg))))]
-  [(local-set-internal mt-local i v) (i v mt-local)])
+  locals-set-internal : locals i v -> locals
+  [(locals-set-internal (i_locals v_locals locals) i_arg v_arg)
+   ,(if (equal? (term i_locals) (term i_arg))
+        (term (i_locals v_arg locals))
+        (term (i_locals v_arg (locals-set-internal locals i_arg v_arg))))]
+  [(locals-set-internal mt-locals i v) (i v mt-locals)])
 
 (define-metafunction WASM-eval
-  local-get-internal : local i -> v
-  [(local-get-internal (i_local v_local local) i_arg)
-   ,(if (equal? (term i_local) (term i_arg))
-        (term v_local)
-        (term (local-get-internal local i_arg)))])
+  locals-get-internal : locals i -> v
+  [(locals-get-internal (i_locals v_locals locals) i_arg)
+   ,(if (equal? (term i_locals) (term i_arg))
+        (term v_locals)
+        (term (locals-get-internal locals i_arg)))])
 
 (define-metafunction WASM-eval
-  local-set : L i v -> L
-  [(local-set (local (e ...) L) i v) ((local-set-internal local i v) (e ...) L)])
+  locals-set : L i v -> L
+  [(locals-set (labels locals (e ...) L) i v) (labels (locals-set-internal locals i v) (e ...) L)])
 
 (define-metafunction WASM-eval
-  local-get : L i -> v
-  [(local-get (local (e ...) L) i) (local-get-internal local i)])
-  
+  locals-get : L i -> v
+  [(locals-get (labels locals (e ...) L) i) (locals-get-internal locals i)])
+
+;; Branching
+
+(define-metafunction WASM-eval
+  perform-br : v_rest ... j L s -> ((e ...) L s)
+  ;; recursively pop labels until we find the matching labels and append its instructions
+  [(perform-br v_rest ... j (((e_loop ...) (e_labels ...) labels) locals (e ...) L) s)
+   ,(if (equal? (term 0) (term j))
+        (term ((v_rest ... e_loop ... e_labels ...) (labels locals (e ...) L) s))
+        (term (perform-br v_rest ... ,(- (term j) 1) (labels locals (e ...) L) s)))]
+  ;; handle case where (br 0) needs to return from the function
+  [(perform-br v_rest ... 0 (mt-labels locals (e ...) L) s)
+   (term ((v_rest ... e ...) L s))]
+  [(perform-br v_rest ... j L s) (((debug "No matching labels for (br j)")) L s)])
 
 ;; MACHINE
 ;; ((values expressions) (context) (store))
@@ -176,8 +221,7 @@
    WASM-eval
 
    ;;;;; LOAD PROGRAM
-
-
+   
    [--> (((module tab_1 elem-i ...  mm_1  f_1 ...) e ...) L s)
         (((module elem-i ... mm_1  f_1 ...) e ...) L (table-add s tab_1))
         init-load-table]
@@ -217,37 +261,104 @@
         ((v_rest ... (delta binop v_1 v_2) e ...) L s)
         binop]
 
+   ;; All relative operators
+   [--> ((v_rest ... v_2 v_1 relop e ...) L s)
+        ((v_rest ... (delta relop v_1 v_2) e ...) L s)
+        relop]
+
    ;; Param
    [--> ((v_rest ... v_1 (param i) e ...) L s)
-        ((v_rest ... e ...) (local-set L i v_1) s)
+        ((v_rest ... e ...) (locals-set L i v_1) s)
         param]
+
+   ;; Local variables (initialized to 0)
+   [--> ((v_rest ... (local i) e ...) L s)
+        ((v_rest ... e ...) (locals-set L i (const 0)) s)
+        locals]
 
    ;; Get-local
    [--> ((v_rest ... (get-local i) e ...) L s)
-        ((v_rest ... (local-get L i) e ...) L s)
+        ((v_rest ... (locals-get L i) e ...) L s)
         get-local]
+
+   ;; Set-local
+   [--> ((v_rest ... v (set-local i) e ...) L s)
+        ((v_rest ... e ...) (locals-set L i v) s)
+        set-local]
 
    ;;;;; FUNCTION CALLS
    
    ;; Call
    [--> ((v_rest ... (call i) e ...) L s)
-        ((v_rest ... (function-get s i)) (mt-local (e ...) L) s)
+        ((v_rest ... (function-get s i)) (mt-labels mt-locals (e ...)  L) s)
         call]
 
+   
    ;; Function expansion
    [--> ((v_rest ... (func i e ...)) L s)
         ((v_rest ... e ...) L s)
         call-expansion]
 
    ;; Implicit return
-   [--> ((v_rest ...) (local (e ...) L) s)
+   [--> ((v_rest ...) (mt-labels locals (e ...) L) s)
         ((v_rest ... e ...) L s)
         return-implicit]
 
+   ;;;;;;; FUNCTION CALL FROM TABLE
    
+   ;; Call Indirect
+   [--> ((v_rest ... v_1 (call-indirect) e ...) L s)
+        ((v_rest ... (fetch-from-table s v_1))(mt-labels mt-locals (e ...)  L) s)
+        call-indirect]
+   
+
+   ;;;;; BRANCHING
+
+   ;; Block
+   [--> ((v_rest ... (block e_block ... end) e_rest ...)
+         (labels locals (e ...) L)
+         s)
+        ((v_rest ... e_block ...)
+         ((() (e_rest ...) labels) locals (e ...) L)
+         s)
+        block]
+
+   ;; Loop
+   [--> ((v_rest ... (loop e_block ... end) e_rest ...)
+         (labels locals (e ...) L)
+         s)
+        ((v_rest ... e_block ...)
+         ((((loop e_block ... end)) (e_rest ...) labels) locals (e ...) L)
+         s)
+        loop]
+
+   ;; Implicit end-block (ignore e_loop instructions when implicitly ending)
+   [--> ((v_rest ...)
+         (((e_loop ...) (e_rest ...) labels) locals (e ...) L)
+         s)
+        ((v_rest ... e_rest ...)
+         (labels locals (e ...) L)
+         s)
+        br-implicit]
+
+   ;; br j. Branch to j-th label in stack.
+   [--> ((v_rest ... (br j) e ...) L s)
+        (perform-br v_rest ... j L s)
+        br]
+
+   ;; br_if true
+   [--> ((v_rest ... (const c) (br-if j) e ...) L s)
+        (perform-br v_rest ... j L s)
+        (side-condition (not (equal? (term c) (term 0))))
+        br-if-true]
+
+   ;; br_if false
+   [--> ((v_rest ... (const 0) (br-if j) e ...) L s)
+        ((v_rest ... e ...) L s)
+        br-if-false]
    ))
-   
-                      
+
+
 (define (load p)
   (cond
     [(redex-match? WASM-eval init p) (term (,p mt-context (mt-s-func mt-s-table mt-s-mem)))]
@@ -267,13 +378,11 @@
 ; Trivial binop
 (test-wasm (term ((module
                       (table 2 anyfunc)
-                    (elem (const 0) $f1 $f2)
-                    (memory  1 )
-                    )
+                    (memory  1 ))
                   (const 5)
                   (const 2)
                   add))
-           (term (const 7)) #:trace #t)
+           (term (const 7)) #:trace #f)
 
 ; Sequential binop
 (test-wasm (term ((module
@@ -355,7 +464,200 @@
                   (const 3)
                   (call test_func)))
            (term (const 8)) #:trace #f)
-           
 
-   
+;; Simple block
+(test-wasm (term ((module
+                      (table 0 anyfunc)
+                    (memory  1 ) 
+                    (func my_func
+                          (block
+                           (const 1)
+                           end)
+                          (const 1)
+                          add
+                          ))
+                  (call my_func)))
+           (term (const 2)) #:trace #f)
 
+;; Simple br
+(test-wasm (term ((module
+                      (table 0 anyfunc)
+                    (memory  1 )
+                    (func my_func
+                          (block
+                           (br 0)
+                           (const 4)
+                           end)
+                          (const 1)
+                          ))
+                  (call my_func)))
+           (term (const 1)) #:trace #f)
+
+;; Nested br
+(test-wasm (term ((module
+                      (table 0 anyfunc)
+                    (memory  1 )
+                    (func my_func
+                          (block
+                           (block
+                            (block
+                             (br 1)
+                             (const 1)
+                             end)
+                            (const 2)
+                            end)
+                           (const 3)
+                           (br 0)
+                           end)
+                          (const 4)
+                          add
+                          ))
+                  (call my_func)))
+           (term (const 7)) #:trace #f)
+
+;; br-if true
+(test-wasm (term ((module
+                      (table 0 anyfunc)
+                    (memory  1 )
+                    (func my_func
+                          (block
+                           (const 2)
+                           (br-if 0)
+                           (const 4)
+                           end)
+                          (const 1)
+                          ))
+                  (call my_func)))
+           (term (const 1)) #:trace #f)
+
+;; br-if false
+(test-wasm (term ((module
+                      (table 0 anyfunc)
+                    (memory  1 )
+                    (func my_func
+                          (block
+                           (const 0)
+                           (br-if 0)
+                           (const 4)
+                           end)
+                          (const 1)
+                          add
+                          ))
+                  (call my_func)))
+           (term (const 5)) #:trace #f)
+
+;; Relop eq true
+(test-wasm (term ((module
+                      (table 0 anyfunc)
+                    (memory  1 )
+                    (func my_func
+                          (const 3)
+                          (const 3)
+                          eq
+                          ))
+                  (call my_func)))
+           (term (const 1)) #:trace #f)
+
+;; Relop eq false
+(test-wasm (term ((module
+                      (table 0 anyfunc)
+                    (memory  1 )
+                    (func my_func
+                          (const 3)
+                          (const 4)
+                          eq
+                          ))
+                  (call my_func)))
+           (term (const 0)) #:trace #f)
+
+;; Simple Loop
+(test-wasm (term ((module
+                      (table 0 anyfunc)
+                    (memory  1 )
+                    (func my_func
+                          (local $0)
+                          (const -4)
+                          (set-local $0)
+                          (const 0)
+                          (loop
+                           ;; increment result by 1
+                           (const 1)
+                           add
+                           ;; update $var0 by 1
+                           (const 1)
+                           (get-local $0)
+                           add
+                           (set-local $0)
+                           ;; break from loop if 0
+                           (get-local $0)
+                           (const 0)
+                           ne
+                           (br-if 0)
+                           end)
+                          ))
+                  (call my_func)))
+           (term (const 4)) #:trace #f)
+
+
+;;;;;;;;;;;;; TABLE TESTS ;;;;;;;;;;;;;;;;;
+
+;;simple instantiation test
+(test-wasm (term ((module
+                        (table 2 anyfunc)
+                      (elem (const 0) $f1 $f2)
+                      (memory  1 ))
+                    (const 5)
+                    (const 2)
+                    add))
+             (term (const 7)) #:trace #f)
+
+;; simple call-indirect test
+(test-wasm (term ((module
+                      (table 1 anyfunc)
+                    (elem (const 0) my_func)
+                    (memory  1 ) 
+                    (func my_func
+                          (block
+                           (const 1)
+                           end)
+                          (const 1)
+                          add
+                          ))
+                  (const 0)
+                  (call-indirect)))
+           (term (const 2)) #:trace #t)
+
+;;complex call-indirect test
+(test-wasm (term ((module
+                        (table 2 anyfunc)
+                      (elem (const 0) my_func1 my_func2)
+                      (memory  1 )
+
+                  (func my_func1
+                          (const 5)
+                          (const 2)
+                          add)
+                  (func my_func2
+                          (const 5)
+                          (const 2)
+                          add
+                          
+                          (const 0)
+                          (call-indirect)
+                          add))
+                 (call my_func2)))
+             (term (const 14)) #:trace #f)
+
+
+(test-wasm (term ((module
+                      (table 0 anyfunc)
+                    (memory  1 ) 
+                    (func my_func
+                          (block
+                           (const 1)
+                           end)
+                          (const 1)
+                          add
+                          ))
+                  (call my_func)))
+           (term (const 2)) #:trace #f)
