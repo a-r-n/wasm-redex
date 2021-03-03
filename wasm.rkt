@@ -79,6 +79,8 @@
   [(delta xor (const c_0) (const c_1)) (const ,(bitwise-xor (term c_0) (term c_1)))]
   ; Note that the shift and rotate ops only make sense in the context of a fixed bit width.
   ; Here, we assume that all operands are 32 bit.
+  ; Further, the right shift and rotate currently assume signed integers,
+  ; which is incorrect for negative values and unsigned integers over 2^32-1
   [(delta shl (const c_0) (const c_1))
    (const ,(bitwise-and #xFFFFFFFF
                         (arithmetic-shift (term c_0) (term c_1))))]
@@ -106,7 +108,7 @@
               (if (or (= 0 rem)
                       (= 1 (bitwise-and 1 in)))
                   0
-                  (+ (- (- (bitwise-and 1 in) 1))
+                  (+ (if (= (bitwise-and 1 in) 0) 1 0)
                      (ctz-internal (arithmetic-shift in -1)
                                    (- rem 1)))))]
       (term (const ,(ctz-internal (term c_in) 32))))]
@@ -116,7 +118,7 @@
               (if (or (= 0 rem)
                       (= #x80000000 (bitwise-and #x80000000 in)))
                   0
-                  (+ (- (- (arithmetic-shift (bitwise-and #x80000000 in) -31) 1))
+                  (+ (if (= (arithmetic-shift (bitwise-and #x80000000 in) -31) 0) 1 0)
                      (clz-internal (arithmetic-shift in 1)
                                    (- rem 1)))))]
       (term (const ,(clz-internal (term c_in) 32))))]
