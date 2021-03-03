@@ -1,5 +1,6 @@
 #lang racket
 
+(require racket/local)
 (require redex)
 
 (define (test+validate step final? extract prog expected)
@@ -25,13 +26,15 @@
 
 (define-language WASM
   (c ::= real)
-  (e ::= binop relop (const c) (call i) trap debug-inst
-     (get-local i) (set-local i) (local i) (param i)
+  (e ::= binop relop unop (const c) (call i) trap debug-inst
+     (get-local i) (set-local i) (tee-local i) (local i) (param i)
      (block e ... end)
      (loop e ... end)
-     (br j) (br-if j))
-  (binop ::= add sub mul div)
-  (relop ::= eq ne)
+     (br j) (br-if j)
+     unreachable nop drop select)
+  (binop ::= add sub mul div rem and or xor shl shr rotl rotr)
+  (unop ::= clz ctz popcnt)
+  (relop ::= eq ne lt gt le ge)
   (f ::= (func i e ...))
   (m ::= (module f ...))
   (i ::= variable-not-otherwise-mentioned)
@@ -41,7 +44,7 @@
   (debug-inst ::= (debug any ...)))
 
 (define-extended-language WASM-eval WASM
-  (op ::= binop relop)
+  (op ::= binop unop relop testop)
   (init ::= (m e ...))
   
   (s ::= (s-func s-table s-mem))
@@ -60,14 +63,94 @@
 ;; Delta
 
 (define-metafunction WASM-eval
-  delta : op v ... -> v
+  delta : op v ... -> v ∨ trap
+  ;;; BINOPS
   [(delta add (const c_0) (const c_1)) (const ,(+ (term c_0) (term c_1)))]
+  [(delta sub (const c_0) (const c_1)) (const ,(- (term c_0) (term c_1)))]
+  [(delta mul (const c_0) (const c_1)) (const ,(* (term c_0) (term c_1)))]
+  [(delta div (const c_0) (const c_1)) ,(if (= (term c_1) 0)
+                                            (term trap)
+                                            (term (const ,(/ (term c_0) (term c_1)))))]
+  [(delta rem (const c_0) (const c_1)) ,(if (= (term c_1) 0)
+                                            (term trap)
+                                            (term (const ,(remainder (term c_0) (term c_1)))))]
+  [(delta and (const c_0) (const c_1)) (const ,(bitwise-and (term c_0) (term c_1)))]
+  [(delta or (const c_0) (const c_1)) (const ,(bitwise-ior (term c_0) (term c_1)))]
+  [(delta xor (const c_0) (const c_1)) (const ,(bitwise-xor (term c_0) (term c_1)))]
+  ; Note that the shift and rotate ops only make sense in the context of a fixed bit width.
+  ; Here, we assume that all operands are 32 bit.
+  ; Further, the right shift and rotate currently assume signed integers,
+  ; which is incorrect for negative values and unsigned integers over 2^32-1
+  [(delta shl (const c_0) (const c_1))
+   (const ,(bitwise-and #xFFFFFFFF
+                        (arithmetic-shift (term c_0) (term c_1))))]
+  [(delta shr (const c_0) (const c_1))
+   (const ,(arithmetic-shift (term c_0) (- (term c_1))))]
+  [(delta rotl (const c_0) (const c_1))
+   (const ,(if (< (term c_1) 0)
+               (term (rotr (const c_0) (const ,(- (term c_1)))))
+               (bitwise-ior (bitwise-and #xFFFFFFFF
+                                         (arithmetic-shift (term c_0) (remainder (term c_1) 32)))
+                            (arithmetic-shift (term c_0)
+                                              (- (remainder (term c_1) 32) 32)))))]
+  [(delta rotr (const c_0) (const c_1))
+   (const ,(if (< (term c_1) 0)
+               (term (rotl (const c_0) (const ,(- (term c_1)))))
+               (bitwise-ior (arithmetic-shift (term c_0) (- (remainder (term c_1) 32)))
+                            (bitwise-and #xFFFFFFFF
+                                         (arithmetic-shift (term c_0)
+                                                           (- 32 (remainder (term c_1) 32)))))))]
+
+  ;;; UNOPS
+  ; These unops only make sense in the context of a fixed bit width. Here, 32 bits.
+  [(delta ctz (const c_in))
+   ,(local [(define (ctz-internal in rem)
+              (if (or (= 0 rem)
+                      (= 1 (bitwise-and 1 in)))
+                  0
+                  (+ (if (= (bitwise-and 1 in) 0) 1 0)
+                     (ctz-internal (arithmetic-shift in -1)
+                                   (- rem 1)))))]
+      (term (const ,(ctz-internal (term c_in) 32))))]
+
+  [(delta clz (const c_in))
+   ,(local [(define (clz-internal in rem)
+              (if (or (= 0 rem)
+                      (= #x80000000 (bitwise-and #x80000000 in)))
+                  0
+                  (+ (if (= (arithmetic-shift (bitwise-and #x80000000 in) -31) 0) 1 0)
+                     (clz-internal (arithmetic-shift in 1)
+                                   (- rem 1)))))]
+      (term (const ,(clz-internal (term c_in) 32))))]
+
+  [(delta popcnt (const c_in))
+   ,(local [(define (popcnt-internal in rem)
+              (if (= 0 rem)
+                  0
+                  (+ (bitwise-and 1 in)
+                     (popcnt-internal (arithmetic-shift in -1)
+                                      (- rem 1)))))]
+      (term (const ,(popcnt-internal (term c_in) 32))))]
+
+  ;;; RELOPS
   [(delta eq (const c_0) (const c_1)) (const ,(if (equal? (term c_0) (term c_1))
                                                   1
                                                   0))]
   [(delta ne (const c_0) (const c_1)) (const ,(if (equal? (term c_0) (term c_1))
                                                   0
-                                                  1))])
+                                                  1))]
+  [(delta lt (const c_0) (const c_1)) (const ,(if (< (term c_0) (term c_1))
+                                                  1
+                                                  0))]
+  [(delta gt (const c_0) (const c_1)) (const ,(if (> (term c_0) (term c_1))
+                                                  1
+                                                  0))]
+  [(delta le (const c_0) (const c_1)) (const ,(if (<= (term c_0) (term c_1))
+                                                  1
+                                                  0))]
+  [(delta ge (const c_0) (const c_1)) (const ,(if (>= (term c_0) (term c_1))
+                                                  1
+                                                  0))])
 
 ;; Get and add functions
 
@@ -150,12 +233,17 @@
    ;;;;; GENERAL INSTRUCTION EVALUATION
    
    ;; All binary operators
-   [--> ((v_rest ... v_2 v_1 binop e ...) L s)
+   [--> ((v_rest ... v_1 v_2 binop e ...) L s)
         ((v_rest ... (delta binop v_1 v_2) e ...) L s)
         binop]
 
+   ;; All unary operators
+   [--> ((v_rest ... v_1 unop e ...) L s)
+        ((v_rest ... (delta unop v_1) e ...) L s)
+        unop]
+
    ;; All relative operators
-   [--> ((v_rest ... v_2 v_1 relop e ...) L s)
+   [--> ((v_rest ... v_1 v_2 relop e ...) L s)
         ((v_rest ... (delta relop v_1 v_2) e ...) L s)
         relop]
 
@@ -178,6 +266,38 @@
    [--> ((v_rest ... v (set-local i) e ...) L s)
         ((v_rest ... e ...) (locals-set L i v) s)
         set-local]
+
+   ;; Tee-local
+   [--> ((v_rest ... v (tee-local i) e ...) L s)
+        ((v_rest ... v e ...) (locals-set L i v) s)
+        tee-local]
+
+   ;; Nop
+   [--> ((v ... nop e ...) L s)
+        ((v ... e ...) L s)
+        nop]
+
+   ;; Drop
+   [--> ((v_rest ... v_1 drop e ...) L s)
+        ((v_rest ... e ...) L s)
+        drop]
+
+   ;; Unreachable
+   [--> ((v ... unreachable e ...) L s)
+        ((v ... trap) L s)
+        unreachable]
+
+   ;; Select
+   [--> ((v_rest ... v_1 v_2 (const 0) select e ...) L s)
+        ((v_rest ... v_2 e ...) L s)
+        select-0]
+   [--> ((v_rest ... v_1 v_2 (const c) select e ...) L s)
+        ((v_rest ... v_1 e ...) L s)
+        (side-condition (not (= (term c) 0)))
+        select-non0]
+
+   
+   
 
    ;;;;; FUNCTION CALLS
    
@@ -264,6 +384,158 @@
 (test-wasm (term ((module) (const 5) (const 2) add))
            (term (const 7)) #:trace #f)
 
+; Sub binop
+(test-wasm (term ((module) (const 5) (const 2) sub))
+           (term (const 3)) #:trace #f)
+
+; Mul binop
+(test-wasm (term ((module) (const 5) (const 2) mul))
+           (term (const 10)) #:trace #f)
+
+; Div binop
+(test-wasm (term ((module) (const 6) (const 2) div))
+           (term (const 3)) #:trace #f)
+(test-wasm (term ((module) (const 6) (const 0) div))
+           (term trap) #:trace #f)
+
+; Rem binop
+(test-wasm (term ((module) (const 6) (const 2) rem))
+           (term (const 0)) #:trace #f)
+(test-wasm (term ((module) (const 6) (const 4) rem))
+           (term (const 2)) #:trace #f)
+(test-wasm (term ((module) (const 6) (const 0) rem))
+           (term trap) #:trace #f)
+
+; And binop
+(test-wasm (term ((module) (const #b1010) (const #b1001) and))
+           (term (const #b1000)) #:trace #f)
+
+; Or binop
+(test-wasm (term ((module) (const #b1010) (const #b1001) or))
+           (term (const #b1011)) #:trace #f)
+
+; xor binop
+(test-wasm (term ((module) (const #b1010) (const #b1001) xor))
+           (term (const #b0011)) #:trace #f)
+
+; shl binop
+(test-wasm (term ((module) (const 1) (const 2) shl))
+           (term (const 4)) #:trace #f)
+
+; shr binop
+(test-wasm (term ((module) (const 4) (const 2) shr))
+           (term (const 1)) #:trace #f)
+
+; rotl binop
+(test-wasm (term ((module) (const #x0000000F) (const 4) rotl))
+           (term (const #x000000F0)) #:trace #f)
+(test-wasm (term ((module) (const #xFF000000) (const 4) rotl))
+           (term (const #xF000000F)) #:trace #f)
+
+; rotr binop
+(test-wasm (term ((module) (const #x0000000F) (const 4) rotr))
+           (term (const #xF0000000)) #:trace #f)
+(test-wasm (term ((module) (const #x000000FF) (const 4) rotr))
+           (term (const #xF000000F)) #:trace #f)
+
+;lt relop
+(test-wasm (term ((module) (const 3) (const 2) lt))
+           (term (const 0)) #:trace #f)
+(test-wasm (term ((module) (const 2) (const 3) lt))
+           (term (const 1)) #:trace #f)
+(test-wasm (term ((module) (const 3) (const 3) lt))
+           (term (const 0)) #:trace #f)
+
+;gt relop
+(test-wasm (term ((module) (const 3) (const 2) gt))
+           (term (const 1)) #:trace #f)
+(test-wasm (term ((module) (const 2) (const 3) gt))
+           (term (const 0)) #:trace #f)
+(test-wasm (term ((module) (const 3) (const 3) gt))
+           (term (const 0)) #:trace #f)
+
+;le relop
+(test-wasm (term ((module) (const 3) (const 2) le))
+           (term (const 0)) #:trace #f)
+(test-wasm (term ((module) (const 2) (const 3) le))
+           (term (const 1)) #:trace #f)
+(test-wasm (term ((module) (const 3) (const 3) le))
+           (term (const 1)) #:trace #f)
+
+;ge relop
+(test-wasm (term ((module) (const 3) (const 2) ge))
+           (term (const 1)) #:trace #f)
+(test-wasm (term ((module) (const 2) (const 3) ge))
+           (term (const 0)) #:trace #f)
+(test-wasm (term ((module) (const 3) (const 3) ge))
+           (term (const 1)) #:trace #f)
+
+;ctz unop
+(test-wasm (term ((module) (const #b1) ctz))
+           (term (const 0)) #:trace #f)
+(test-wasm (term ((module) (const #b100) ctz))
+           (term (const 2)) #:trace #f)
+(test-wasm (term ((module) (const #b1000010) ctz))
+           (term (const 1)) #:trace #f)
+(test-wasm (term ((module) (const 0) ctz))
+           (term (const 32)) #:trace #f)
+
+;clz unop
+(test-wasm (term ((module) (const #x00080000) clz))
+           (term (const 12)) #:trace #f)
+(test-wasm (term ((module) (const #x00000001) clz))
+           (term (const 31)) #:trace #f)
+(test-wasm (term ((module) (const #x80000000) clz))
+           (term (const 0)) #:trace #f)
+(test-wasm (term ((module) (const 0) clz))
+           (term (const 32)) #:trace #f)
+
+;popcnt unop
+(test-wasm (term ((module) (const #x000F0000) popcnt))
+           (term (const 4)) #:trace #f)
+(test-wasm (term ((module) (const #x000F0F00) popcnt))
+           (term (const 8)) #:trace #f)
+(test-wasm (term ((module) (const #xFFFFFFFF) popcnt))
+           (term (const 32)) #:trace #f)
+(test-wasm (term ((module) (const #x00000000) popcnt))
+           (term (const 0)) #:trace #f)
+
+;nop
+(test-wasm (term ((module)
+                  (const 3)
+                  nop nop nop nop nop nop nop))
+           (term (const 3)) #:trace #f)
+
+;drop
+(test-wasm (term ((module)
+                  (const 1)
+                  (const 44)
+                  (const 3)
+                  drop
+                  (const 2)
+                  drop
+                  drop))
+           (term (const 1)) #:trace #f)
+
+;unreachable
+(test-wasm (term ((module)
+                  unreachable))
+           (term trap) #:trace #f)
+
+;select
+(test-wasm (term ((module)
+                  (const 88)
+                  (const 66)
+                  (const 0)
+                  select))
+           (term (const 66)) #:trace #f)
+(test-wasm (term ((module)
+                  (const 88)
+                  (const 66)
+                  (const 1)
+                  select))
+           (term (const 88)) #:trace #f)
+
 ; Sequential binop
 (test-wasm (term ((module)
                   (const 7)
@@ -273,7 +545,7 @@
                   add))
            (term (const 14)) #:trace #f)
 
-; Sequential binopo with values after add op
+; Sequential binop with values after add op
 (test-wasm (term ((module)
                   (const 7)
                   (const 5)
@@ -323,119 +595,133 @@
                   (call caller)))
            (term (const 11)) #:trace #f)
 
+;; tee local
+(test-wasm (term ((module
+                      (func tee_me
+                            (param $0)
+                            (param $1)
+                            (get-local $1)
+                            (tee-local $0)
+                            (get-local $0)
+                            add))
+                  (const 2)
+                  (const 1)
+                  (call tee_me)))
+           (term (const 4)) #:trace #f)
+
 ;; Simple block
 (test-wasm (term ((module
-                     (func my_func
-                           (block
+                      (func my_func
+                            (block
+                             (const 1)
+                             end)
                             (const 1)
-                            end)
-                           (const 1)
-                           add
-                      ))
-                 (call my_func)))
+                            add
+                            ))
+                  (call my_func)))
            (term (const 2)) #:trace #f)
 
 ;; Simple br
 (test-wasm (term ((module
-                     (func my_func
-                           (block
-                            (br 0)
-                            (const 4)
-                            end)
-                           (const 1)
-                      ))
-                 (call my_func)))
+                      (func my_func
+                            (block
+                             (br 0)
+                             (const 4)
+                             end)
+                            (const 1)
+                            ))
+                  (call my_func)))
            (term (const 1)) #:trace #f)
 
 ;; Nested br
 (test-wasm (term ((module
-                     (func my_func
-                           (block
+                      (func my_func
                             (block
                              (block
-                              (br 1)
-                              (const 1)
+                              (block
+                               (br 1)
+                               (const 1)
+                               end)
+                              (const 2)
+                              end)
+                             (const 3)
+                             (br 0)
                              end)
-                             (const 2)
-                             end)
-                            (const 3)
-                            (br 0)
-                            end)
-                           (const 4)
-                           add
-                      ))
-                 (call my_func)))
+                            (const 4)
+                            add
+                            ))
+                  (call my_func)))
            (term (const 7)) #:trace #f)
 
 ;; br-if true
 (test-wasm (term ((module
-                     (func my_func
-                           (block
-                            (const 2)
-                            (br-if 0)
-                            (const 4)
-                            end)
-                           (const 1)
-                      ))
-                 (call my_func)))
+                      (func my_func
+                            (block
+                             (const 2)
+                             (br-if 0)
+                             (const 4)
+                             end)
+                            (const 1)
+                            ))
+                  (call my_func)))
            (term (const 1)) #:trace #f)
 
 ;; br-if false
 (test-wasm (term ((module
-                     (func my_func
-                           (block
-                            (const 0)
-                            (br-if 0)
-                            (const 4)
-                            end)
-                           (const 1)
-                           add
-                      ))
-                 (call my_func)))
+                      (func my_func
+                            (block
+                             (const 0)
+                             (br-if 0)
+                             (const 4)
+                             end)
+                            (const 1)
+                            add
+                            ))
+                  (call my_func)))
            (term (const 5)) #:trace #f)
 
 ;; Relop eq true
 (test-wasm (term ((module
-                     (func my_func
-                           (const 3)
-                           (const 3)
-                           eq
-                      ))
-                 (call my_func)))
+                      (func my_func
+                            (const 3)
+                            (const 3)
+                            eq
+                            ))
+                  (call my_func)))
            (term (const 1)) #:trace #f)
 
 ;; Relop eq false
 (test-wasm (term ((module
-                     (func my_func
-                           (const 3)
-                           (const 4)
-                           eq
-                      ))
-                 (call my_func)))
+                      (func my_func
+                            (const 3)
+                            (const 4)
+                            eq
+                            ))
+                  (call my_func)))
            (term (const 0)) #:trace #f)
 
 ;; Simple Loop
 (test-wasm (term ((module
-                     (func my_func
-                           (local $0)
-                           (const -4)
-                           (set-local $0)
-                           (const 0)
-                           (loop
-                            ;; increment result by 1
-                            (const 1)
-                            add
-                            ;; update $var0 by 1
-                            (const 1)
-                            (get-local $0)
-                            add
+                      (func my_func
+                            (local $0)
+                            (const -4)
                             (set-local $0)
-                            ;; break from loop if 0
-                            (get-local $0)
                             (const 0)
-                            ne
-                            (br-if 0)
-                            end)
-                      ))
-                 (call my_func)))
+                            (loop
+                             ;; increment result by 1
+                             (const 1)
+                             add
+                             ;; update $var0 by 1
+                             (const 1)
+                             (get-local $0)
+                             add
+                             (set-local $0)
+                             ;; break from loop if 0
+                             (get-local $0)
+                             (const 0)
+                             ne
+                             (br-if 0)
+                             end)
+                            ))
+                  (call my_func)))
            (term (const 4)) #:trace #f)
