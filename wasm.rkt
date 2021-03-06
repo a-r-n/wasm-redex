@@ -56,8 +56,8 @@
   (s-mem ::= mt-s-mem (j mem-list))
   (s ::= (s-func s-table s-mem))
   (s-func ::= mt-s-func (i f s-func))
-  (table-elem ::= mt-table-elem (v_index i table-elem))
-  (s-table ::= mt-s-table  (table-type j_size  table-elem))
+  (table-elem ::= () (v_index i table-elem))
+  (s-table ::= mt-s-table  (table-type j_size table-elem))
   (L ::= mt-context (labels locals (e ...) L))
   ;; the signature of labels is (loop-instrs instrs-after-block labels)
   (labels ::= mt-labels ((e ...) (e ...) labels))
@@ -81,56 +81,47 @@
 
 ;;;;;;;;; TABLE
 
-;; add table
+;; init table
 (define-metafunction WASM-eval
-  table-add : s tab -> s
-  [(table-add (s-func s-table s-mem) (table j_1 table-type )) (s-func (table-type j_1 ((const 0) $nopointer mt-table-elem)) s-mem)])
-;;Add-update table 
-(define-metafunction WASM-eval
-  table-add-update-function : s-func s-mem s-table i -> s
-  [(table-add-update-function s-func s-mem (table-type j_size (v_index i_1 table-elem))  i_funcN)
-   ,(if (equal? (term i_1) (term $nopointer))
-        ;;update the table with the function and build up the store
-        (term ( s-func
-                (table-type j_size (v_index i_funcN table-elem))
-                s-mem))
-        ;;add the function 
-        (if (< (term (get-const v_index)) (- (term j_size) 1))
-            ;;add the function to the table and build up the store
-            (term ( s-func
-                    (table-type j_size ((const ,(+ (term (get-const v_index)) 1)) i_funcN (v_index i_1 table-elem)))
-                    s-mem))
+  init-table : s-table tab -> s-table
+  [(init-table s-table (table j_1 table-type)) (table-type j_1 ())])
 
-            ;;throw exception
-            (term (func DEBUG-BAD (debug "Table index out of bound" c_size)))))])
+;; add element to table
+(define-metafunction WASM-eval
+  table-add : s-table i -> s-table
+  [(table-add (table-type j_size (v_index i_1 table-elem)) i_funcN)
+   ;; TODO (should this be <=)
+   ,(if (< (term (get-const v_index)) (- (term j_size) 1))
+            ;;add the function to the table and build up the store
+            (term (table-type j_size ((const ,(+ (term (get-const v_index)) 1)) i_funcN (v_index i_1 table-elem))))
+            ;;throw exception (TODO: should this be trap?)
+            (term (func DEBUG-BAD (debug "Table index out of bound" c_size))))]
+  [(table-add (table-type j_size ()) i_funcN)
+   ;; TODO (should this be <=)
+   ,(if (< 0 (term j_size))
+        (term (table-type j_size ((const 0) i_funcN ())))
+        ;;throw exception (TODO: should this be trap?)
+        (term (func DEBUG-BAD (debug "Table index out of bound" c_size))))])
+
 
 ;;helper meta-function to extract number from  (const c) value
 (define-metafunction WASM-eval
   get-const : v -> c
   [(get-const (const c_1)) c_1])
 
-
-;;set table add function
-(define-metafunction WASM-eval
-  table-operation-function : s i -> s
-  [(table-operation-function (s-func s-table s-mem)  i_funcN) (table-add-update-function s-func s-mem s-table i_funcN)])
-
-;;fetch function from table
-(define-metafunction WASM-eval
-  fetch-from-table : s v -> f
-  [(fetch-from-table (s-func s-table s-mem) v_1) (search-table (s-func s-table s-mem) s-table v_1)])
-
 ;;search the table with the const index
-
 (define-metafunction WASM-eval
-  search-table : s s-table v -> f
-  [(search-table s (table-type j_size (v_index i_1 table-elem)) v_1)
+  table-get : s-func s-table v -> f
+  [(table-get s-func (table-type j_size (v_index i_1 table-elem)) v_1)
    ;;use the index passed to fetch the function
-   ,(if (= (term (get-const v_1))  (term (get-const v_index)) )
-        (term (function-get s i_1))
-        (term (search-table s (table-type j_size table-elem) v_1)))]
-  ;;throw exception, if its not found
-  [(search-table s mt-s-table v_1) (func DEBUG-BAD (debug "Function not found in Table" v_1))])
+   ,(if (= (term (get-const v_1)) (term (get-const v_index)) )
+        (term (function-get s-func i_1))
+        (term (table-get s-func (table-type j_size table-elem) v_1)))]
+  ;;throw exception (TODO: should this be trap?)
+  ;; TODO (remove the func wrapper)
+  [(table-get s (table-type j_size ()) v_1) (func DEBUG-BAD (debug "Table index out of bounds" v_1))]
+  [(table-get s mt-s-table v_1) (func DEBUG-BAD (debug "Function not found in Table" v_1))])
+  
   
 
 (define-metafunction WASM-eval
@@ -193,16 +184,12 @@
   [(function-add (s-func s-table s-mem) (func i e ...)) ((i (func i e ...) s-func) s-table s-mem)])
 
 (define-metafunction WASM-eval
-  function-get-internal : s-func i -> f
-  [(function-get-internal (i_func f s-func) i_arg) ,(if (equal? (term i_arg) (term i_func))
+  function-get : s-func i -> f
+  [(function-get (i_func f s-func) i_arg) ,(if (equal? (term i_arg) (term i_func))
                                                         (term f)
-                                                        (term (function-get-internal
+                                                        (term (function-get
                                                                s-func i_arg)))]
-  [(function-get-internal mt-s-func i) (func DEBUG-BAD (debug "function not defined" i))])
-
-(define-metafunction WASM-eval
-  function-get : s i -> f
-  [(function-get (s-func s-table s-mem) i) (function-get-internal s-func i)])
+  [(function-get mt-s-func i) (func DEBUG-BAD (debug "function not defined" i))])
 
 ;; Local variables
 
@@ -253,23 +240,22 @@
    WASM-eval
 
    ;;;;; LOAD PROGRAM
-   
-   [--> (((module tab_1 elem-i ...  mm_1  f_1 ...) e ...) L s)
-        (((module elem-i ... mm_1  f_1 ...) e ...) L (table-add s tab_1))
-        init-load-table]
 
-   ;; update module table in store
+   ;; Init table
+   [--> (((module tab_1 elem-i ... mm_1 f_1 ...) e ...) L (s-func s-table s-mem))
+        (((module elem-i ... mm_1 f_1 ...) e ...) L (s-func (init-table s-table tab_1) s-mem))
+        init-load-table]
+   
+   ;; Update table - destructure function names
    [--> (((module (elem v i_1 i_2 ...) mm_1  f_1 ...) e ...) L s)
-        (((module  i_1 i_2 ... mm_1 f_1 ...) e ...) L s)
+        (((module i_1 i_2 ... mm_1 f_1 ...) e ...) L s)
         init-update-table]
 
-   ;;table manipulation
-   [--> (((module i_1 i_2 ... mm_1 f_1 ...) e ...)  L s)
-        (((module i_2 ... mm_1 f_1 ...) e ...) L (table-operation-function s  i_1))
+   ;; Update table - add elements to table
+   [--> (((module i_1 i_2 ... mm_1 f_1 ...) e ...)  L (s-func s-table s-mem))
+        (((module i_2 ... mm_1 f_1 ...) e ...) L (s-func (table-add s-table i_1) s-mem))
         add-func-to-table]
 
-
-   
    ;; Load module memory to store
    [--> (((module  mm_1  f_1 ...) e ...) L (s-func s-table s-mem))
         (((module f_1 ...) e ...) L (s-func s-table (init-mem s-mem mm_1)))
@@ -279,7 +265,6 @@
    [--> (((module f_1 f_2 ...) e ...) L s)
         (((module f_2 ...) e ...) L (function-add s f_1))
         init-load-function]
-   
    
    ;; After done with the module, begin executing instructions
    [--> (((module) e ...) L s)
@@ -321,8 +306,8 @@
    ;;;;; FUNCTION CALLS
    
    ;; Call
-   [--> ((v_rest ... (call i) e ...) L s)
-        ((v_rest ... (function-get s i)) (mt-labels mt-locals (e ...)  L) s)
+   [--> ((v_rest ... (call i) e ...) L (s-func s-table s-mem))
+        ((v_rest ... (function-get s-func i)) (mt-labels mt-locals (e ...)  L) (s-func s-table s-mem))
         call]
 
    
@@ -339,8 +324,8 @@
    ;;;;;;; FUNCTION CALL FROM TABLE
    
    ;; Call Indirect
-   [--> ((v_rest ... v_1 call-indirect e ...) L s)
-        ((v_rest ... (fetch-from-table s v_1))(mt-labels mt-locals (e ...)  L) s)
+   [--> ((v_rest ... v_1 call-indirect e ...) L (s-func s-table s-mem))
+        ((v_rest ... (table-get s-func s-table v_1)) (mt-labels mt-locals (e ...)  L) (s-func s-table s-mem))
         call-indirect]
 
    ;;;;;;; MEMORY STORE AND LOAD
@@ -426,7 +411,7 @@
                   (const 5)
                   (const 2)
                   add))
-           (term (const 7)) #:trace #f)
+           (term (const 7)) #:trace #t)
 
 ; Sequential binop
 (test-wasm (term ((module
