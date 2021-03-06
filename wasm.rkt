@@ -53,7 +53,6 @@
   (op ::= binop relop)
   (init ::= (m e ...))
   (mem-list ::= () (j st mem-list))
-  (mem-store ::=  st)
   (s-mem ::= mt-s-mem (j mem-list))
   (s ::= (s-func s-table s-mem))
   (s-func ::= mt-s-func (i f s-func))
@@ -135,101 +134,57 @@
   
 
 (define-metafunction WASM-eval
-  memory-add : s mm -> s
-  [(memory-add (s-func s-table s-mem) (memory j_1)) (s-func s-table ( ,(* (term j_1) 64) (init-mem 0 s-mem () ,(make-string 32 #\0))))])
+  init-mem : s-mem mm -> s-mem
+  [(init-mem s-mem (memory j_1)) (,(* (term j_1) 64000) ())])
 
 (define-metafunction WASM-eval
-  init-mem : j s-mem mem-list st -> mem-list
-  [(init-mem j s-mem mem-list st)
-   ,(if (and (equal? (term s-mem) (term mt-s-mem)) (not (equal? (term st) "")))
-            (term (init-mem
-               ,(+ (term j) 1)
-               s-mem
-               (j ,(substring (term st) (- (string-length (term st)) 8) (string-length (term st))) mem-list)
-               ,(substring (term st) 0 (- (string-length (term st)) 8))))
-            
-            (term mem-list))])
-
-
-(define-metafunction WASM-eval
-  memory_store : s v_1 v_2  -> s
-  [(memory_store (s-func s-table (j mem-list)) v_1 v_2)
-   (store-in-memory s-func s-table j mem-list v_1 v_2 )])
-
-(define-metafunction WASM-eval
-  store-in-memory : s-func s-table  j mem-list v_1 v_2 -> s
-  [(store-in-memory  s-func s-table j_size (j_index st mem-list) (const c_offset) (const c_value) )
-   ,(if(= (term j_index) (term c_offset))
-      (term
-       (store-in-memory-helper s-func s-table j_size mem-list
-                                           ,(string-append
-                                            (make-string (- 32 (string-length(number->string (term c_value) 2))) #\0)
-                                            (number->string (term c_value) 2))))
-
-      (term (store-in-memory  s-func s-table j_size mem-list (const c_offset) (const c_value))))])
+  memory-store : s-mem v_1 v_2 -> s-mem
+  [(memory-store (j_mem-size mem-list) (const c_load-addr) (const c_val))
+   ,(if (>= (+ (term c_load-addr) 4) (term j_mem-size))
+        (term trap)
+        (let ()
+          (define val-string (number->string (term c_val) 2))
+          (define val-string-32
+            (string-append
+             (make-string (- 32 (string-length val-string)) #\0)
+             val-string))
+          ;; add number as little-endian bytes in front of mem-list
+          (term
+           (j_mem-size
+            (,(+ (term c_load-addr) 3)
+             ,(substring val-string-32 0 8)
+             (,(+ (term c_load-addr) 2)
+              ,(substring val-string-32 8 16)
+              (,(+ (term c_load-addr) 1)
+               ,(substring val-string-32 16 24)
+               (c_load-addr
+                ,(substring val-string-32 24 32)
+                mem-list))))))))])
 
 (define-metafunction WASM-eval
-  store-in-memory-helper : s-func s-table  j mem-list st -> s
-  [(store-in-memory-helper s-func s-table j_size (j_index st_1 mem-list_1) st )
-   ,(if ( <  (+ (term j_index) 1) (* (term j_size) 1024))
-     (if(not (equal? (term st) ""))
-      (term
-       (store-in-memory-helper
-        s-func
-        s-table
-        j_size
-        (,(+ (term j_index) 1) ,(substring (term st) (- (string-length (term st)) 8) (string-length (term st))) (j_index st_1 mem-list_1))
-      ,(substring (term st) 0 (- (string-length (term st)) 8))))
-      
-      (term (s-func s-table (j_size (j_index st_1 mem-list_1)))) )
-     
-     (term (func DEBUG-BAD (debug "Memory size overflow" ,(* (+ (term j_index) 1) 8))))
-     )]
-[(store-in-memory-helper s-func s-table j_size () st )
- ,(if(not (equal? (term st) ""))
-     (term
-       (store-in-memory-helper  
-        s-func
-        s-table
-        j_size
-        (0 ,(substring (term st) (- (string-length (term st)) 8) (string-length (term st))) ())
-        ,(substring (term st) 0 (- (string-length (term st)) 8))))
-
-     (term (s-func s-table (j ()))))])
-
-
-;;load from memory
-(define-metafunction WASM-eval
-  load-from-memory : s v  -> v
-  [(load-from-memory (s-func s-table (j mem-list))  v_offset) (read-from-memory mem-list v_offset)])
-
+  memory-load : s-mem v -> v
+  [(memory-load (j_mem-size mem-list) (const c_load-addr))
+    ,(if (>= (+ (term c_load-addr) 4) (term j_mem-size))
+        (term trap)
+        ;; reconstruct number from little-endian bytes
+        (term
+         (const
+         ,(string->number
+          (string-append
+           (term (get-byte ,(+ (term c_load-addr) 3) mem-list))
+           (term (get-byte ,(+ (term c_load-addr) 2) mem-list))
+           (term (get-byte ,(+ (term c_load-addr) 1) mem-list))
+           (term (get-byte c_load-addr mem-list)))
+          2))))])
 
 (define-metafunction WASM-eval
-  read-from-memory : mem-list v -> v
-  [(read-from-memory  (j_index st mem-list) (const c))
-   ,(if (<= (+ (term c) 3) (term j_index))
-        (if (= (term j_index)  (+ (term c) 3) )
-        (term (read-from-memory-helper (j_index st mem-list) c ""))
+  get-byte : c_load-addr mem-list -> st
+  [(get-byte c_load-addr (j_offset st mem-list_next))
+   ,(if (= (term c_load-addr) (term j_offset))
+        (term st)
+        (term (get-byte c_load-addr mem-list_next)))]
+  [(get-byte c_load-addr ()) "00000000"])
 
-        (term (read-from-memory mem-list (const c))))
-
-        (term (func DEBUG-BAD (debug "Offset out of range" (const c)))))])
-
-(define-metafunction WASM-eval
-  read-from-memory-helper : mem-list j st -> v
-  [(read-from-memory-helper (j_index st_1 mem-list) j_1 st)
-   ,(if (= (term j_index)  (term j_1))
-        (term (const ,(string->number (string-append (term st) (term st_1)) 2 )))
-
-        (term (read-from-memory-helper mem-list j_1 ,(string-append (term st) (term st_1)))))])
-
-
-;;helper meta-function to build memory offset track
-(define-metafunction WASM-eval
-  make-memory-offsets : v mem-offsets -> mem-offsets
-  [(make-memory-offsets v_1 (j_start j_end mem-offsets))
-   (j_end ,(+ (string-length (number->string (term (extract-const-value v_1)) 2)) (term j_end)) (j_start j_end mem-offsets))]
-  [(make-memory-offsets v_1 mt-offset) (0  ,(string-length (number->string (term (extract-const-value v_1)) 2)) mt-offset)])
 
 ;; Get and add functions
 
@@ -316,8 +271,8 @@
 
    
    ;; Load module memory to store
-   [--> (((module  mm_1  f_1 ...) e ...) L s)
-        (((module f_1 ...) e ...) L (memory-add s mm_1))
+   [--> (((module  mm_1  f_1 ...) e ...) L (s-func s-table s-mem))
+        (((module f_1 ...) e ...) L (s-func s-table (init-mem s-mem mm_1)))
         init-load-memory]
    
    ;; Load module functions to the function store
@@ -390,19 +345,16 @@
 
    ;;;;;;; MEMORY STORE AND LOAD
 
-   ;;STORE TO MEMORY
-   
-   [--> ((v_rest ... v_1 v_2 store e ...) L s)
-        ((v_rest ... e ...)L (memory_store s v_1 v_2 ))
+   ;; Store
+   [--> ((v_rest ... v_1 v_2 store e ...) L (s-func s-table s-mem))
+        ((v_rest ... e ...) L (s-func s-table (memory-store s-mem v_1 v_2)))
         store-memory]
-   ;
-   [--> ((v_rest ... v_1 load e ...) L s)
-        ((v_rest ... (load-from-memory s v_1))(mt-labels mt-locals (e ...)  L) s)
+   
+   ;; Load
+   [--> ((v_rest ... v_1 load e ...) L (s-func s-table s-mem))
+        ((v_rest ... (memory-load s-mem v_1) e ...) L (s-func s-table s-mem))
         load-memory]
 
-   
-
-  
  
    ;;;;; BRANCHING
 
@@ -865,20 +817,21 @@
 (test-wasm (term ((module
                       (table 2 anyfunc)
                     (elem (const 0) $f1 $f2)
-                    (memory  1 ))
-                  
+                    (memory 1))
                   (const 100)
-                  (const 800)
+                  (const 2000)
                   store
-                   ;(const 1)
-                  ;(const 800)
-                 ; store
-                 ; (const 1)
-                  ;load
-                  ))
-           (term (const 800)) #:trace #t)
+                  (const 100)
+                  load))
+           (term (const 2000)) #:trace #f)
 
-
+(test-wasm (term ((module
+                      (table 2 anyfunc)
+                    (elem (const 0) $f1 $f2)
+                    (memory 1))
+                  (const 1000)
+                  load))
+           (term (const 0)) #:trace #f)
 
 (test-wasm (term ((module
                       (table 2 anyfunc)
@@ -907,6 +860,3 @@
                           add))
                   (call my_func2)))
            (term (const 7918331)) #:trace #f)
-
-;(string-append (string-append (make-string (- 8 (string-length (number->string 2 2))) #\0) (number->string 2 2))
-;                 (make-string (- 32 (string-length (string-append (make-string (- 8 (string-length (number->string 2 2))) #\0) (number->string 2 2)))) #\0))
