@@ -109,7 +109,6 @@
   get-const : v -> c
   [(get-const (const c_1)) c_1])
 
-
 ;;set table add function
 (define-metafunction WASM-eval
   table-operation-function : s i -> s
@@ -139,8 +138,8 @@
 
 (define-metafunction WASM-eval
   memory-store : s-mem v_1 v_2 -> s-mem
-  [(memory-store (j_mem-size mem-list) (const c_load-addr) (const c_val))
-   ,(if (>= (+ (term c_load-addr) 4) (term j_mem-size))
+  [(memory-store (j_mem-size mem-list) (const c_store-addr) (const c_val))
+   ,(if (>= (+ (term c_store-addr) 4) (term j_mem-size))
         (term trap)
         (let ()
           (define val-string (number->string (term c_val) 2))
@@ -151,15 +150,33 @@
           ;; add number as little-endian bytes in front of mem-list
           (term
            (j_mem-size
-            (,(+ (term c_load-addr) 3)
+            (update-byte
+             ,(+ (term c_store-addr) 3)
              ,(substring val-string-32 0 8)
-             (,(+ (term c_load-addr) 2)
+             (update-byte
+              ,(+ (term c_store-addr) 2)
               ,(substring val-string-32 8 16)
-              (,(+ (term c_load-addr) 1)
+              (update-byte
+               ,(+ (term c_store-addr) 1)
                ,(substring val-string-32 16 24)
-               (c_load-addr
+               (update-byte
+                c_store-addr
                 ,(substring val-string-32 24 32)
                 mem-list))))))))])
+
+(define-metafunction WASM-eval
+  update-byte : c st mem-list -> mem-list
+  [(update-byte c_new-addr st_new (j_curr-addr st_curr mem-list_next))
+   ;; if c_store-addr is equal to current byte addr, replace current byte
+   ,(if (= (term j_curr-addr) (term c_new-addr))
+        (term (c_new-addr st_new mem-list_next))
+        ;; if c_store-addr is less than current byte addr, insert byte before it
+        (if (< (term j_curr-addr) (term c_new-addr))
+            (term (c_new-addr st_new (j_curr-addr st_curr mem-list_next)))
+            ;; else recurse and keep building new mem-list
+            (term (j_curr-addr st_curr (update-byte c_new-addr st_new mem-list_next)))))]
+  ;; if mem-list is empty, just insert new byte
+  [(update-byte c_store-addr st_new ()) (c_store-addr st_new ())])
 
 (define-metafunction WASM-eval
   memory-load : s-mem v -> v
@@ -860,3 +877,4 @@
                           add))
                   (call my_func2)))
            (term (const 7918331)) #:trace #f)
+
