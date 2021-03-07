@@ -56,8 +56,8 @@
   (s-mem ::= mt-s-mem (j mem-list))
   (s ::= (s-func s-table s-mem))
   (s-func ::= mt-s-func (i f s-func))
-  (table-elem ::= () (v_index i table-elem))
-  (s-table ::= mt-s-table  (table-type j_size table-elem))
+  (table-elem ::= () (i table-elem))
+  (s-table ::= mt-s-table  (table-type j_size j_curr-size table-elem))
   (L ::= mt-context (labels locals (e ...) L))
   ;; the signature of labels is (loop-instrs instrs-after-block labels)
   (labels ::= mt-labels ((e ...) (e ...) labels))
@@ -84,25 +84,16 @@
 ;; init table
 (define-metafunction WASM-eval
   init-table : s-table tab -> s-table
-  [(init-table s-table (table j_1 table-type)) (table-type j_1 ())])
+  [(init-table s-table (table j_1 table-type)) (table-type j_1 0 ())])
 
 ;; add element to table
 (define-metafunction WASM-eval
   table-add : s-table i -> s-table
-  [(table-add (table-type j_size (v_index i_1 table-elem)) i_funcN)
-   ;; TODO (should this be <=)
-   ,(if (< (term (get-const v_index)) (- (term j_size) 1))
+  [(table-add (table-type j_size j_curr-size table-elem) i_funcN)
+   ,(if (< (term j_curr-size) (term j_size))
             ;;add the function to the table and build up the store
-            (term (table-type j_size ((const ,(+ (term (get-const v_index)) 1)) i_funcN (v_index i_1 table-elem))))
-            ;;throw exception (TODO: should this be trap?)
-            (term (func DEBUG-BAD (debug "Table index out of bound" c_size))))]
-  [(table-add (table-type j_size ()) i_funcN)
-   ;; TODO (should this be <=)
-   ,(if (< 0 (term j_size))
-        (term (table-type j_size ((const 0) i_funcN ())))
-        ;;throw exception (TODO: should this be trap?)
-        (term (func DEBUG-BAD (debug "Table index out of bound" c_size))))])
-
+            (term (table-type j_size ,(+ 1 (term j_curr-size)) (i_funcN table-elem)))
+            (term (debug "Table index out of bound" c_size)))])
 
 ;;helper meta-function to extract number from  (const c) value
 (define-metafunction WASM-eval
@@ -112,17 +103,22 @@
 ;;search the table with the const index
 (define-metafunction WASM-eval
   table-get : s-func s-table v -> f
-  [(table-get s-func (table-type j_size (v_index i_1 table-elem)) v_1)
+  [(table-get s-func (table-type j_size j_curr-size table-elem) v_1)
    ;;use the index passed to fetch the function
-   ,(if (= (term (get-const v_1)) (term (get-const v_index)) )
-        (term (function-get s-func i_1))
-        (term (table-get s-func (table-type j_size table-elem) v_1)))]
-  ;;throw exception (TODO: should this be trap?)
-  ;; TODO (remove the func wrapper)
-  [(table-get s (table-type j_size ()) v_1) (func DEBUG-BAD (debug "Table index out of bounds" v_1))]
-  [(table-get s mt-s-table v_1) (func DEBUG-BAD (debug "Function not found in Table" v_1))])
-  
-  
+   ,(if (< (term (get-const v_1)) (term j_curr-size))
+        (let ()
+          (define desired-index (- (- (term j_curr-size) 1) (term (get-const v_1))))
+          (define func-name (term (table-get-nth-elem ,desired-index table-elem)))
+          (term (function-get s-func ,func-name)))
+        (term (debug "Table index out of bounds" v_1)))]
+  [(table-get s-func mt-s-table v_1) (debug "Table does not exist" v_1)])
+
+(define-metafunction WASM-eval
+  table-get-nth-elem : j table-elem -> i
+  [(table-get-nth-elem j (i_1 table-elem_next))
+   ,(if (= (term j) 0)
+          (term i_1)
+          (term (table-get-nth-elem ,(- (term j) 1) table-elem_next)))])
 
 (define-metafunction WASM-eval
   init-mem : s-mem mm -> s-mem
