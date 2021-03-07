@@ -116,7 +116,7 @@
   fetch-from-table : s v -> f
   [(fetch-from-table (s-func s-table s-mem) v_1) (search-table (s-func s-table s-mem) s-table v_1)])
 
-;;search the table with the const index
+;;search the table with the const indexes 
 
 (define-metafunction WASM-eval
   search-table : s s-table v -> f
