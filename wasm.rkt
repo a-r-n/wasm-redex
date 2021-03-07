@@ -43,7 +43,7 @@
   (tab ::= (table j table-type))
   (elem-i ::= (elem v i i ...))
   (ex ::= (export st i) )
-  (m ::= (module tab elem-i ...  mm  f ...))
+  (m ::= (module f ...)(module tab elem-i ...  mm  f ...))
   (v ::= (const c))
   (i ::= variable-not-otherwise-mentioned)
   (j ::= natural)
