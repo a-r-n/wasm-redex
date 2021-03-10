@@ -1294,19 +1294,19 @@
 (test-wasm (term ((module
                       (func my_func
                             (const 0)
-                         (if (const 10) else (const 20))
-                         (const 1)
-                         add))
-                    (call my_func)))
+                            (if (const 10) else (const 20))
+                            (const 1)
+                            add))
+                  (call my_func)))
            (term (const 21)) #:trace #f)
 
 ;; If not 0
 (test-wasm (term ((module
                       (func my_func
                             (const 100)
-                         (if (const 10) else (const 20))
-                         (const 1)
-                         add))
-                    (call my_func)))
+                            (if (const 10) else (const 20))
+                            (const 1)
+                            add))
+                  (call my_func)))
            (term (const 11)) #:trace #f)
 
