@@ -33,6 +33,7 @@
      (block e ... end)
      (loop e ... end)
      (br j) (br-if j)
+     (if e ... else e ...)
      unreachable nop drop select)
   (binop ::= add sub mul div rem and or xor shl shr rotl rotr)
   (unop ::= clz ctz popcnt)
@@ -514,8 +515,16 @@
         (side-condition (not (= (term c) 0)))
         select-non0]
 
-   
-   
+   ;; If 0
+   [--> ((v_rest ... (const 0) (if e_if ... else e_else ...) e ...) L s)
+        ((v_rest ... (block e_else ... end) e ...) L s)
+        if-0]
+
+   ;; If not 0
+   [--> ((v_rest ... (const c) (if e_if ... else e_else ...) e ...) L s)
+        ((v_rest ... (block e_if ... end) e ...) L s)
+        (side-condition (not (= (term c) 0)))
+        if-not-0]
 
    ;;;;; FUNCTION CALLS
    
@@ -1107,7 +1116,7 @@
                   store
                   (const 2000)
                   load))
-           (term (const 0)) #:trace #t)
+           (term (const 0)) #:trace #f)
 
 ;(test-wasm (term ((module
 ;                      (table 2 anyfunc)
@@ -1249,7 +1258,7 @@
                   (const 1)
                   load
                   ))
-           (term (const 800)) #:trace #t)
+           (term (const 800)) #:trace #f)
 
 
 
@@ -1280,4 +1289,24 @@
                           add))
                   (call my_func2)))
            (term (const 7918331)) #:trace #f)
+
+;; If 0
+(test-wasm (term ((module
+                      (func my_func
+                            (const 0)
+                            (if (const 10) else (const 20))
+                            (const 1)
+                            add))
+                  (call my_func)))
+           (term (const 21)) #:trace #f)
+
+;; If not 0
+(test-wasm (term ((module
+                      (func my_func
+                            (const 100)
+                            (if (const 10) else (const 20))
+                            (const 1)
+                            add))
+                  (call my_func)))
+           (term (const 11)) #:trace #f)
 
