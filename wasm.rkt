@@ -29,7 +29,7 @@
   (c ::= real)
   (st ::= string)
   (e ::= binop relop unop (const c) (call i) call-indirect store load trap debug-inst
-     (get-local i) (set-local i) (tee-local i) (local i) (param i)
+     (get-local i) (set-local i) (tee-local i) (local i) (param i i ...)
      (block e ... end)
      (loop e ... end)
      (br j) (br-if j)
@@ -373,8 +373,8 @@
   locals-set-internal : locals i v -> locals
   [(locals-set-internal (i_locals v_locals locals) i_arg v_arg)
    ,(if (equal? (term i_locals) (term i_arg))
-        (term (i_locals v_arg locals))
-        (term (i_locals v_arg (locals-set-internal locals i_arg v_arg))))]
+        (term (i_arg v_arg locals))
+        (term (i_locals v_locals (locals-set-internal locals i_arg v_arg))))]
   [(locals-set-internal mt-locals i v) (i v mt-locals)])
 
 (define-metafunction WASM-eval
@@ -467,9 +467,14 @@
         relop]
 
    ;; Param
-   [--> ((v_rest ... v_1 (param i) e ...) L s)
-        ((v_rest ... e ...) (locals-set L i v_1) s)
+   [--> ((v_rest ... v_1 (param i_rest ... i) e ...) L s)
+        ((v_rest ... (param i_rest ...) e ...) (locals-set L i v_1) s)
         param]
+
+   ;; Discard empty param identifier
+   [--> ((v_rest ... (param) e ...) L s)
+        ((v_rest ... e ...) L s)
+        param-empty]
 
    ;; Local variables (initialized to 0)
    [--> ((v_rest ... (local i) e ...) L s)
@@ -845,14 +850,12 @@
                       (table 0 anyfunc)
                     (memory  1 )
                     (func callee
-                          (param $0)
-                          (param $1)
+                          (param $0 $1)
                           (get-local $0)
                           (get-local $1)
                           add)
                     (func caller
-                          (param $0)
-                          (param $1)
+                          (param $0 $1)
                           (const 5)
                           (get-local $0)
                           (const 3)
@@ -863,8 +866,8 @@
                   (const 1)
                   (const 2)
                   (call caller)))
-           (term (const 11)) #:trace #f)
-;
+           (term (const 10)) #:trace #f)
+
 (test-wasm (term ((module
                       (table 0 anyfunc)
                     (memory  1 )
@@ -877,11 +880,25 @@
                   (call test_func)))
            (term (const 8)) #:trace #f)
 
+;; Evaluate call args in correct order
+(test-wasm (term ((module
+                    (func my_func
+                          (param $0 $1 $2)
+                          (get-local $0)
+                          (get-local $1)
+                          sub
+                          (get-local $2)
+                          sub))
+                  (const 5)
+                  (const 3)
+                  (const 1)
+                  (call my_func)))
+           (term (const 1)) #:trace #f)
+
 ;; tee local
 (test-wasm (term ((module
                       (func tee_me
-                            (param $0)
-                            (param $1)
+                            (param $0 $1)
                             (get-local $1)
                             (tee-local $0)
                             (get-local $0)
@@ -889,7 +906,7 @@
                   (const 2)
                   (const 1)
                   (call tee_me)))
-           (term (const 4)) #:trace #f)
+           (term (const 2)) #:trace #f)
 
 ;; Simple block
 (test-wasm (term ((module
