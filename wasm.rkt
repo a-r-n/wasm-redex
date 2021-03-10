@@ -34,7 +34,7 @@
      (loop e ... end)
      (br j) (br-if j)
      (if e ... else e ...)
-     unreachable nop drop select)
+     unreachable nop drop select return)
   (binop ::= add sub mul div rem and or xor shl shr rotl rotr)
   (unop ::= clz ctz popcnt)
   (relop ::= eq ne lt gt le ge)
@@ -543,6 +543,11 @@
    [--> ((v_rest ... (func i e ...)) L s)
         ((v_rest ... e ...) L s)
         call-expansion]
+
+   ;; Return
+   [--> ((v_rest ... return e_rest ...) (labels locals (e_frame ...) L) s)
+        ((v_rest ... e_frame ...) L s)
+        return-explicit]
 
    ;; Implicit return
    [--> ((v_rest ...) (mt-labels locals (e ...) L) s)
@@ -1327,3 +1332,25 @@
                   (call my_func)))
            (term (const 11)) #:trace #f)
 
+;; Explicitly return
+(test-wasm (term ((module
+                      (func ret_func
+                            (const 3)
+                            return
+                            (const 5)))
+                  (call ret_func)))
+           (term (const 3)) #:trace #f)
+
+(test-wasm (term ((module
+                      (func my_func
+                            (block
+                             (const 0)
+                             return
+                             (br-if 0)
+                             (const 4)
+                             end)
+                            (const 1)
+                            add
+                            ))
+                  (call my_func)))
+           (term (const 0)) #:trace #f)
