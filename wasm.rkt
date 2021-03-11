@@ -644,6 +644,7 @@
            #:extract (λ (x) (first (first x)))
            #:trace b)]))
 
+#|
 
 ; Trivial binop
 (test-wasm (term ((module
@@ -1354,3 +1355,42 @@
                             ))
                   (call my_func)))
            (term (const 0)) #:trace #f)
+|#
+
+
+
+
+
+
+
+
+
+
+; Binary operator demo
+(test-wasm (term ((module)
+                  (const 5)
+                  (const 2)
+                  (const 1)
+                  add
+                  sub
+                  (const 5)
+                  mul))
+           (term (const 10)) #:trace #t)
+           
+
+
+
+
+
+
+
+; Function call demo
+(test-wasm (term ((module
+                    (func test_func
+                          (param $0)
+                          (const 5)
+                          (get-local $0)
+                          add))
+                  (const 3)
+                  (call test_func)))
+           (term (const 8)) #:trace #t)
